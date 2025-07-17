@@ -1,0 +1,90 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch: # Permet le d├®clenchement manuel
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Login to Docker Hub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+
+    - name: Build and push Docker image
+      run: |
+        echo "--- Contenu du Dockerfile utilisé pour le build ---"
+        cat Dockerfile
+        echo "---------------------------------------------------"
+        docker build -t ${{ secrets.DOCKER_USERNAME }}/project-d14e6612-0be3-4551-9699-fd3b37892701:latest .
+        docker push ${{ secrets.DOCKER_USERNAME }}/project-d14e6612-0be3-4551-9699-fd3b37892701:latest
+
+  deploy-and-health-check:
+    runs-on: ubuntu-latest
+    needs: build-and-deploy
+
+    steps:
+      - name: Pull Docker image
+        run: |
+          docker pull ${{ secrets.DOCKER_USERNAME }}/project-d14e6612-0be3-4551-9699-fd3b37892701:latest
+          echo "Image ${{ secrets.DOCKER_USERNAME }}/project-d14e6612-0be3-4551-9699-fd3b37892701:latest pulled successfully."
+
+      - name: Run Docker container
+        id: run_container
+        run: |
+          set -x 
+          docker run -d --name my-app -p 3000:3000 ${{ secrets.DOCKER_USERNAME }}/project-d14e6612-0be3-4551-9699-fd3b37892701:latest
+          echo "Conteneur 'my-app' démarré sur le port 3000 du runner (mappé au port 3000 du conteneur)."
+          echo "container_id=$(docker ps -aqf \"name=my-app\")" >> $GITHUB_OUTPUT
+          sleep 5 
+          echo "--- Début des logs du conteneur 'my-app' ---"
+          docker logs my-app
+          echo "--- Fin des logs du conteneur 'my-app' ---"
+          echo "--- Docker ps -a (all containers) ---"
+          docker ps -a
+          echo "-------------------------------------"
+          echo "--- Docker inspect my-app ---"
+          docker inspect my-app
+          echo "-------------------------------"
+          set +x 
+
+      - name: Health Check and Content Test
+        run: |
+          echo "Attente du démarrage de l'application Node.js..."
+          HEALTH_URL="http://localhost:3000/" # Utilisez le port du runner pour le curl
+          MAX_RETRIES=15
+          RETRY_DELAY=5
+          
+          for i in $(seq 1 $MAX_RETRIES); do
+            printf "Tentative %d/%d: Vérification de %s\n" "$i" "$MAX_RETRIES" "$HEALTH_URL"
+            RESPONSE=$(curl --fail -s $HEALTH_URL)
+            if [[ "$?" -eq 0 ]]; then
+              echo "Application est saine et répond !"
+              echo "Pas de vérification de contenu spécifique pour Node.js. Vérification du statut HTTP seulement."
+              exit 0 # Exit successfully if content check passes or is skipped
+            else
+              printf "Application pas encore prête ou erreur de connexion. Nouvelle tentative dans %d secondes...\n" "$RETRY_DELAY"
+              sleep $RETRY_DELAY
+            fi
+          done
+          echo "L'application n'est pas devenue saine dans le délai imparti. Vérifiez les logs du conteneur pour les erreurs."
+          exit 1
+
+      - name: Clean up Docker container
+        if: always()
+        run: |
+          echo "Arrêt et suppression du conteneur 'my-app'..."
+          docker stop my-app || true 
+          docker rm my-app || true
+          echo "Conteneur nettoyé."
